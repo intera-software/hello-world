@@ -20,8 +20,10 @@ inputs:
 
 outputs:
   digest:
+    description: 'Digest of the built container image'
     value: ${{ steps.build.outputs.digest }}
   image:
+    description: 'Tags of the built container image'
     value: ${{ steps.meta.outputs.tags }}
 
 runs:
@@ -71,7 +73,7 @@ runs:
       env:
         COSIGN_PRIVATE_KEY: ${{ inputs.cosign-key }}
         COSIGN_PASSWORD: ${{ inputs.cosign-pass }}
-      runs: |
+      run: |
         echo "Signing image with digest: ${{ steps.build.outputs.digest }}"
         cosign sign --yes ${{ inputs.registry }}/${{ inputs.image-name }}@${{ steps.build.outputs.digest }}  
       
