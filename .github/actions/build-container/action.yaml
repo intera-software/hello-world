@@ -11,10 +11,10 @@ inputs:
   image-name:
     description: 'Image name'
     required: true
-  cosign-key:
+  cosign-private-key:
     description: 'Cosign private key for signing'
     required: true
-  cosign-pass:
+  cosign-password:
     description: 'Cosign private key password'
     required: true
 
@@ -42,7 +42,7 @@ runs:
     - name: Install Cosign
       uses: sigstore/cosign-installer@main
       with:
-        cosign-release: "v2.5.x"
+        cosign-release: "v2.5.3"
 
     - name: Extract metadata
       id: meta
