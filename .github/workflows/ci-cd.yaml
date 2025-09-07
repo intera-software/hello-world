@@ -40,7 +40,11 @@ jobs:
         run: dotnet restore
 
       - name: Build application
-        run: dotnet build --configuration Release --no-restore -p:Version=${{ steps.version.outputs.version }}
+        run: |
+          dotnet build \
+            --configuration Release \
+            --no-restore \
+            # -p:Version=${{ steps.version.outputs.version }}
 
       - name: Run unit tests
         run: |
