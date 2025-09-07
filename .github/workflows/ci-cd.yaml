@@ -59,6 +59,7 @@ jobs:
         with:
           version: ${{ steps.version.outputs.version }}
           registry: ${{ env.REGISTRY }}
+          registry-token: ${{ secrets.CONTAINER_REGISTRY_TOKEN || github.token }}
           image-name: ${{ env.IMAGE_NAME }}
           cosign-private-key: ${{ secrets.COSIGN_PRIVATE_KEY }}
           cosign-password: ${{ secrets.COSIGN_PASSWORD }}

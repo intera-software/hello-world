@@ -8,6 +8,9 @@ inputs:
   registry:
     description: 'Container registry'
     required: true
+  registry-token:
+    description: 'Container registry token'
+    required: true
   image-name:
     description: 'Image name'
     required: true
@@ -37,8 +40,8 @@ runs:
       with:
         registry: ${{ inputs.registry }}
         username: ${{ github.actor }}
-        password: ${{ github.token }}
-    
+        password: ${{ inputs.registry-token }}
+
     - name: Install Cosign
       uses: sigstore/cosign-installer@main
       with:
