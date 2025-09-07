@@ -28,32 +28,35 @@ runs:
           major=0
           minor=0
           patch=0
-          branch_name=$(echo "${branch_name//[^a-zA-Z0-9]/-}" | tr '[:upper:]' '[:lower:]')
 
-        # Get branch name (if not main)
+        # Get branch name (if not main or pull_request)
         branch_name=""
         if [[ "$GITHUB_REF" != "refs/heads/main" && "$GITHUB_EVENT_NAME" != "pull_request" ]]; then
           branch_name=${GITHUB_REF#refs/heads/}
           branch_name=${branch_name//[^a-zA-Z0-9]/-}
         fi
 
-        # Generate the version
+        # Use single hyphen for pre-release identifiers to follow semantic versioning
         if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
-          version="${major}.${minor}.${patch}--pr${GITHUB_EVENT_NUMBER}.${commit_hash}"
+          version="${major}.${minor}.${patch}-pr${GITHUB_EVENT_NUMBER}.${commit_hash}"
         elif [ "$GITHUB_REF" = "refs/heads/main" ]; then
           version="${major}.${minor}.${patch}"
         else
           if [ -n "$branch_name" ]; then
-            version="${major}.${minor}.${patch}--${branch_name}.${commit_hash}"
+            version="${major}.${minor}.${patch}-${branch_name}.${commit_hash}"
           else
             version="${major}.${minor}.${patch}.${commit_hash}"
           fi
         fi
-
+        fi
         echo "Generated version: $version"
-        if [ -n "$GITHUB_OUTPUT" ]; then
+        if [ -n "$GITHUB_OUTPUT" ] && [ -w "$GITHUB_OUTPUT" ]; then
           echo "version=$version" >> "$GITHUB_OUTPUT"
+        elif [ -n "$GITHUB_OUTPUT" ] && [ ! -e "$GITHUB_OUTPUT" ]; then
+          echo "Warning: \$GITHUB_OUTPUT does not exist, creating file."
+          echo "version=$version" > "$GITHUB_OUTPUT"
         else
           echo "version=$version" >> version.txt
+        fi
         fi
 
