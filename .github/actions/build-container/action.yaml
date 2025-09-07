@@ -73,8 +73,8 @@ runs:
     - name: Sign container image
       shell: bash
       env:
-        COSIGN_PRIVATE_KEY: ${{ inputs.cosign-key }}
-        COSIGN_PASSWORD: ${{ inputs.cosign-pass }}
+        COSIGN_PRIVATE_KEY: ${{ inputs.cosign-private-key }}
+        COSIGN_PASSWORD: ${{ inputs.cosign-password }}
       run: |
         echo "Signing image with digest: ${{ steps.build.outputs.digest }}"
         cosign sign --yes ${{ inputs.registry }}/${{ inputs.image-name }}@${{ steps.build.outputs.digest }}  
@@ -95,5 +95,5 @@ runs:
           --output attest-output.json \
           ${{ inputs.registry }}/${{ inputs.image-name }}@${{ steps.build.outputs.digest }}
       env:
-        COSIGN_PRIVATE_KEY: ${{ inputs.cosign-key }}
-        COSIGN_PASSWORD: ${{ inputs.cosign-pass }}
+        COSIGN_PRIVATE_KEY: ${{ inputs.cosign-private-key }}
+        COSIGN_PASSWORD: ${{ inputs.cosign-password }}
