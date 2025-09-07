@@ -40,7 +40,9 @@ runs:
         password: ${{ github.token }}
     
     - name: Install Cosign
-      uses: sigstore/cosign-installer@v3
+      uses: sigstore/cosign-installer@main
+      with:
+        cosign-release: "v2.5.x"
 
     - name: Extract metadata
       id: meta
