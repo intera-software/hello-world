@@ -53,11 +53,6 @@ jobs:
             --results-directory ./coverage \
             --logger trx
 
-      - name: Code coverage report
-        uses: ./.github/actions/coverage-report
-        with:
-          coverage-path: ./coverage
-
       - name: Build and sign container
         id: build
         uses: ./.github/actions/build-container
@@ -100,6 +95,9 @@ jobs:
       name: development
       url: ${{ steps.deploy.outputs.url }}
     steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
       - name: Deploy to Dev Environment
         id: deploy
         uses: ./.github/actions/deploy-environment
@@ -149,6 +147,9 @@ jobs:
       name: staging
       url: ${{ steps.deploy.outputs.url }}
     steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
       - name: Security team gate check
         uses: ./.github/actions/security-gate-check
 
@@ -194,6 +195,9 @@ jobs:
       name: production
       url: ${{ steps.deploy.outputs.url }}
     steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
       - name: Security team gate check
         uses: ./.github/actions/security-gate-check
 
