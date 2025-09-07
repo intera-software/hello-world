@@ -1,0 +1,298 @@
+# .github/workflows/security-block.yml
+name: Security Team Deployment Block
+
+on:
+  issues:
+    types: [opened, labeled, unlabeled, closed, edited]
+  issue_comment:
+    types: [created]
+
+jobs:
+  handle-security-block:
+    name: Handle Security Block
+    runs-on: ubuntu-latest
+    if: >
+      (github.event_name == 'issues' && contains(github.event.issue.labels.*.name, 'security-block')) ||
+      (github.event_name == 'issue_comment' && contains(github.event.issue.labels.*.name, 'security-block'))
+    steps:
+      - name: Validate security team member
+        id: validate
+        uses: actions/github-script@v7
+        with:
+          script: |
+            // Get security team members from repository teams
+            let securityTeamMembers = [];
+            
+            try {
+              // Try to get security team members from the organization
+              const { data: teams } = await github.rest.teams.listForOrg({
+                org: context.repo.owner
+              });
+              
+              const securityTeam = teams.find(team => team.name === 'security-team');
+              
+              if (securityTeam) {
+                const { data: members } = await github.rest.teams.listMembersInOrg({
+                  org: context.repo.owner,
+                  team_slug: securityTeam.slug
+                });
+                securityTeamMembers = members.map(member => member.login);
+              }
+            } catch (error) {
+              console.log('Could not fetch team members, using fallback list');
+              // Fallback: Add specific usernames if team API is not accessible
+              securityTeamMembers = [
+                // Add security team GitHub usernames here as fallback
+                'security-lead-username',
+                'security-engineer-1-username',
+                'security-engineer-2-username'
+              ];
+            }
+            
+            console.log('Security team members:', securityTeamMembers);
+            
+            const actor = context.actor;
+            const isSecurityTeam = securityTeamMembers.includes(actor);
+            
+            if (!isSecurityTeam && github.event_name === 'issues' && 
+                (github.event.action === 'opened' || github.event.action === 'labeled')) {
+              
+              await github.rest.issues.createComment({
+                issue_number: context.issue.number,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                body: `⚠️ **UNAUTHORIZED SECURITY BLOCK ATTEMPT**
+                
+                @${actor} is not authorized to create deployment blocks. Only members of the security team can block deployments.
+                
+                **Authorized Security Team Members**: ${securityTeamMembers.map(m => `@${m}`).join(', ')}
+                
+                This security-block label will be removed automatically.`
+              });
+              
+              // Remove the security-block label if not authorized
+              try {
+                await github.rest.issues.removeLabel({
+                  issue_number: context.issue.number,
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  name: 'security-block'
+                });
+              } catch (error) {
+                console.log('Label removal failed:', error.message);
+              }
+              
+              core.setFailed(`Unauthorized security block attempt by ${actor}`);
+              return;
+            }
+            
+            core.setOutput('authorized', isSecurityTeam);
+            core.setOutput('actor', actor);
+            console.log(`Security action by ${actor}: ${isSecurityTeam ? 'AUTHORIZED' : 'UNAUTHORIZED'}`);
+
+      - name: Process security block creation
+        if: >
+          steps.validate.outputs.authorized == 'true' && 
+          github.event_name == 'issues' && 
+          (github.event.action == 'opened' || github.event.action == 'labeled')
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const issueNumber = context.issue.number;
+            const issueTitle = context.issue.title;
+            const issueBody = context.issue.body || 'No details provided';
+            const actor = '${{ steps.validate.outputs.actor }}';
+            
+            // Create detailed block notification comment
+            const blockComment = `🚨 **DEPLOYMENT SECURITY BLOCK ACTIVATED**
+            
+            **🔒 Status**: ALL DEPLOYMENTS BLOCKED
+            **👤 Blocked by**: @${actor} (Security Team)
+            **🎫 Block Issue**: #${issueNumber}
+            **📋 Reason**: ${issueTitle}
+            **⏰ Activated**: ${new Date().toISOString()}
+            
+            ---
+            
+            **📝 Security Concern Details**:
+            ${issueBody}
+            
+            ---
+            
+            **🚫 Impact**:
+            - ❌ All deployments to **staging** and **production** environments are BLOCKED
+            - ❌ All deployment workflows will fail at security gate checks
+            - ✅ Development environment deployments continue normally
+            - ⚠️ Pull request builds and testing continue normally
+            
+            **🔄 Next Steps**:
+            1. **Development Team**: Address the security concerns outlined above
+            2. **Security Team**: Review fixes and validate security posture
+            3. **Security Team**: Close this issue (#${issueNumber}) when resolved
+            4. **Automatic**: Deployments resume when this issue is closed
+            
+            **👥 Affected Teams**: 
+            - @dev-team - Please review and address security concerns
+            - @qa-team - Staging deployments are blocked until resolved
+            - @sre-team @operations-team - Production deployments are blocked until resolved
+            
+            **🔍 Monitoring**: All deployment attempts will reference this issue for block status.
+            `;
+            
+            await github.rest.issues.createComment({
+              issue_number: issueNumber,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: blockComment
+            });
+            
+            // Pin the issue for visibility
+            await github.rest.issues.update({
+              issue_number: issueNumber,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open'
+            });
+            
+            // Add additional labels for tracking
+            await github.rest.issues.addLabels({
+              issue_number: issueNumber,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              labels: ['urgent', 'deployment-blocked', 'security']
+            });
+
+      - name: Process security block removal
+        if: >
+          steps.validate.outputs.authorized == 'true' && 
+          github.event_name == 'issues' && 
+          github.event.action == 'closed'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const issueNumber = context.issue.number;
+            const actor = '${{ steps.validate.outputs.actor }}';
+            const closedBy = context.issue.closed_by ? context.issue.closed_by.login : actor;
+            
+            // Create unblock notification comment
+            const unblockComment = `✅ **DEPLOYMENT SECURITY BLOCK REMOVED**
+            
+            **🔓 Status**: DEPLOYMENTS RESUMED
+            **👤 Unblocked by**: @${closedBy} (Security Team)
+            **🎫 Resolved Issue**: #${issueNumber}
+            **⏰ Resolved**: ${new Date().toISOString()}
+            **📝 Resolution**: Security concerns have been addressed and validated
+            
+            ---
+            
+            **✅ Impact**:
+            - ✅ Deployments to **staging** and **production** environments are now ALLOWED
+            - ✅ All deployment workflows can proceed through normal approval processes
+            - 🔄 Any pending deployments can now continue
+            
+            **📋 Status Summary**:
+            - Development deployments: ✅ Always available
+            - Staging deployments: ✅ Now available (requires QA approval)
+            - Production deployments: ✅ Now available (requires SRE approval)
+            
+            **👥 Teams Notified**:
+            - @dev-team - Deployments can now proceed
+            - @qa-team - Staging deployments are available for approval
+            - @sre-team @operations-team - Production deployments are available for approval
+            
+            All teams can resume normal deployment workflows.
+            `;
+            
+            await github.rest.issues.createComment({
+              issue_number: issueNumber,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: unblockComment
+            });
+
+      - name: Handle security block updates
+        if: >
+          steps.validate.outputs.authorized == 'true' && 
+          github.event_name == 'issues' && 
+          github.event.action == 'edited'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const issueNumber = context.issue.number;
+            const actor = '${{ steps.validate.outputs.actor }}';
+            
+            const updateComment = `🔄 **SECURITY BLOCK UPDATED**
+            
+            **👤 Updated by**: @${actor} (Security Team)
+            **⏰ Updated**: ${new Date().toISOString()}
+            **🎫 Issue**: #${issueNumber}
+            
+            The security block details have been updated. Deployments remain blocked until this issue is closed.
+            
+            **Current Status**: 🚫 ALL DEPLOYMENTS STILL BLOCKED
+            `;
+            
+            await github.rest.issues.createComment({
+              issue_number: issueNumber,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: updateComment
+            });
+
+      - name: Handle unauthorized label removal
+        if: >
+          github.event_name == 'issues' && 
+          github.event.action == 'unlabeled' && 
+          github.event.label.name == 'security-block' &&
+          steps.validate.outputs.authorized != 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const actor = context.actor;
+            
+            // Re-add the security-block label
+            await github.rest.issues.addLabels({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              labels: ['security-block']
+            });
+            
+            await github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: `🚫 **UNAUTHORIZED LABEL REMOVAL BLOCKED**
+              
+              @${actor} attempted to remove the security-block label but is not authorized to do so.
+              
+              **Only security team members can remove security blocks.**
+              
+              The security-block label has been automatically re-added.`
+            });
+
+  # Separate job to handle workflow cancellation if security block exists
+  check-active-blocks:
+    name: Check for Active Security Blocks
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_run' || github.event_name == 'workflow_dispatch'
+    steps:
+      - name: Check for active security blocks
+        uses: actions/github-script@v7
+        with:
+          script: |
+            // Check for any open issues with security-block label
+            const { data: issues } = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              labels: 'security-block',
+              state: 'open'
+            });
+            
+            if (issues.length > 0) {
+              const blockIssues = issues.map(issue => `#${issue.number}: ${issue.title}`).join('\n');
+              
+              core.setFailed(`Deployment blocked by active security issues:\n${blockIssues}`);
+            } else {
+              console.log('No active security blocks found');
+            }

@@ -1,0 +1,81 @@
+name: 'Security Scan'
+description: 'Performs various security scans (SAST, DAST, dependency checks and container)'
+
+inputs:
+  scan-type:
+    description: 'Type of scan to perform (sast, dast, dependency, container)'
+    required: true
+  image-digest:
+    description: 'Container image digest for container scan'
+    required: false
+  target-url:
+    description: 'Target URL for DAST scan'
+    required: false
+  synk-token:
+    description: 'Snyk API token'
+    required: false
+
+runs:
+  using: 'composite'
+  steps:
+    - name: SAST scan wityh Snyk Code
+      if: inputs.scan-type == 'sast'
+      shell: bash
+      env:
+        SNYK_TOKEN: ${{ inputs.synk-token }}
+      run: |
+        # Install Snyk CLI
+        npm install -g Snyk
+
+        # Authenticate Snyk
+        snyk auth $SNYK_TOKEN
+
+        # Run SAST scan
+        snyk code test --sarif-file-output=sast-report.sarif || true
+
+        # Upload results
+        if [ -f sast-report.sarif ]; then
+          echo "SAST scan completed. SARIF report generated at sast-report.sarif"
+          if [ -n "$GITHUB_STEP_SUMMARY" ]; then
+            echo "## SAST Scan Report" >> "$GITHUB_STEP_SUMMARY"
+            echo "SAST scan completed. [View SARIF report](sast-report.sarif)" >> "$GITHUB_STEP_SUMMARY"
+          fi
+        else
+          echo "No issues found in SAST scan."
+        fi
+
+    - name: Dependency scan with Snyk
+      if: inputs.scan-type == 'dependency'
+      shell: bash
+      env:
+        SNYK_TOKEN: ${{ inputs.synk-token }}
+      run: |
+        # Install Snyk CLI
+        npm install -g Snyk
+
+        # Authenticate Snyk
+        snyk auth $SNYK_TOKEN
+
+        # Run dependency scan
+        snyk test --json-file-output=dependency-report.json --severity-threshold=medium|| true
+
+        # Check for high/critical vulnerabilities
+        if [ -f dependency-report.json ]; then
+          # Extract and count vulnerabilities with severity "high" or "critical" from the dependency report
+          HIGH_VULNS=$(jq '[.vulnerabilities[] | select(.severity == "high" or .severity == "critical")] | length' dependency-report.json)
+          if [ "$HIGH_VULNS" -gt 0 ]; then
+            echo "High or critical vulnerabilities found: $HIGH_VULNS"
+            exit 1
+          fi
+        fi
+
+        # Upload results
+        if [ -f dependency-report.json ]; then
+          echo "Dependency scan completed. JSON report generated at dependency-report.json"
+          if [ -n "$GITHUB_STEP_SUMMARY" ]; then
+            echo "## Dependency Scan Report" >> "$GITHUB_STEP_SUMMARY"
+            echo "Dependency scan completed. [View JSON report](dependency-report.json)" >> "$GITHUB_STEP_SUMMARY"
+          fi
+        else
+          echo "No issues found in dependency scan."
+        fi

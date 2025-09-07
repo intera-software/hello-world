@@ -1,0 +1,138 @@
+name: 🚨 Security Deployment Block
+description: EMERGENCY - Block all deployments due to security concerns
+title: "[SECURITY BLOCK] "
+labels: ["security-block", "security", "urgent"]
+assignees:
+  - security-team
+body:
+  - type: markdown
+    attributes:
+      value: |
+        # 🚨 EMERGENCY SECURITY DEPLOYMENT BLOCK
+        
+        ⚠️ **WARNING**: This will IMMEDIATELY block ALL deployments to staging and production environments.
+        
+        **Use this only for legitimate security emergencies that require immediate action.**
+        
+        🔒 **Who can use this**: Only security team members  
+        📋 **What it does**: Prevents all deployments until this issue is closed  
+        ⏰ **When to use**: Critical security vulnerabilities, compliance violations, or security incidents  
+  
+  - type: dropdown
+    id: severity
+    attributes:
+      label: 🚨 Security Severity Level
+      description: How critical is this security issue?
+      options:
+        - "🔴 CRITICAL - Immediate production security threat"
+        - "🟠 HIGH - Significant security vulnerability"
+        - "🟡 MEDIUM - Moderate security concern requiring review"
+        - "🔵 LOW - Minor security issue for next deployment cycle"
+      default: 0
+    validations:
+      required: true
+  
+  - type: textarea
+    id: security-concern
+    attributes:
+      label: 🛡️ Security Concern Description
+      description: Provide a detailed description of the security issue
+      placeholder: |
+        Describe the security vulnerability, threat, or concern in detail:
+        - What is the specific security issue?
+        - How was it discovered?
+        - What systems/components are affected?
+        - What is the potential impact?
+        - Is this being actively exploited?
+    validations:
+      required: true
+  
+  - type: textarea
+    id: affected-components
+    attributes:
+      label: 📦 Affected Components
+      description: List all affected systems, services, endpoints, or components
+      placeholder: |
+        Examples:
+        - Authentication service
+        - User data endpoints (/api/users/*)
+        - Payment processing module
+        - Third-party integrations
+        - Container base images
+        - Dependencies (specify which ones)
+    validations:
+      required: true
+  
+  - type: textarea
+    id: evidence
+    attributes:
+      label: 🔍 Evidence/Proof
+      description: Provide evidence of the security issue (logs, screenshots, scanner results, etc.)
+      placeholder: |
+        Include relevant evidence:
+        - Security scanner results
+        - Log entries showing suspicious activity
+        - URLs demonstrating the vulnerability
+        - Code snippets showing the issue
+        - External security advisories/CVE numbers
+    validations:
+      required: true
+
+  - type: textarea
+    id: remediation-steps
+    attributes:
+      label: 🔧 Required Remediation Steps
+      description: What specific actions need to be taken to resolve this security issue?
+      placeholder: |
+        Provide step-by-step remediation instructions:
+        1. Update dependency X to version Y.Z
+        2. Apply security patch to authentication module
+        3. Rotate compromised API keys
+        4. Update firewall rules to block suspicious IPs
+        5. Run security verification tests
+        6. Security team validation required before unblock
+    validations:
+      required: true
+
+  - type: dropdown
+    id: timeline
+    attributes:
+      label: ⏰ Required Resolution Timeline
+      description: How urgently must this be resolved?
+      options:
+        - "🚨 IMMEDIATE - Must be fixed before ANY deployment"
+        - "⚡ URGENT - Must be fixed within 24 hours"
+        - "📅 HIGH - Must be fixed within 72 hours"
+        - "📆 NORMAL - Can be included in next planned deployment cycle"
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: impact-confirmation
+    attributes:
+      label: ⚠️ Impact Confirmation
+      description: Please confirm you understand the impact of this security block
+      options:
+        - label: "I understand this will immediately block ALL staging and production deployments"
+          required: true
+        - label: "I am a member of the security team with authority to block deployments"
+          required: true
+        - label: "This is a legitimate security concern requiring immediate deployment blocking"
+          required: true
+        - label: "I have provided sufficient evidence and remediation steps above"
+          required: true
+
+  - type: checkboxes
+    id: notification-confirmation
+    attributes:
+      label: 📢 Team Notification
+      description: Confirm teams that should be immediately notified
+      options:
+        - label: "Development team (@dev-team) - to address the security issue"
+          required: true
+        - label: "QA team (@qa-team) - staging deployments are blocked"
+          required: true
+        - label: "SRE/Operations teams (@sre-team @operations-team) - production deployments are blocked"
+          required: true
+        - label: "Management/Leadership - for high/critical severity issues"
+          required: false

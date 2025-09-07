@@ -1,0 +1,95 @@
+name: 'Build and Sign Container'
+description: 'Builds Docker container and signs with Cosign'
+
+inputs:
+  version:
+    description: 'Application version'
+    required: true
+  registry:
+    description: 'Container registry'
+    required: true
+  image-name:
+    description: 'Image name'
+    required: true
+  cosign-key:
+    description: 'Cosign private key for signing'
+    required: true
+  cosign-pass:
+    description: 'Cosign private key password'
+    required: true
+
+outputs:
+  digest:
+    value: ${{ steps.build.outputs.digest }}
+  image:
+    value: ${{ steps.meta.outputs.tags }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    - name: Log in to Container Registry
+      uses: docker/login-action@v3
+      with:
+        registry: ${{ inputs.registry }}
+        username: ${{ github.actor }}
+        password: ${{ github.token }}
+    
+    - name: Install Cosign
+      uses: sigstore/cosign-installer@v3
+
+    - name: Extract metadata
+      id: meta
+      uses: docker/metadata-action@v5
+      with:
+        images: ${{ inputs.registry }}/${{ inputs.image-name }}
+        tags: |
+          type=raw,value=${{ inputs.version }}
+          type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+          type=sha,prefix=${{ github.ref_name }}-
+    
+    - name: Build and push Docker image
+      id: build
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        file: ./Dockerfile
+        push: true
+        tags: ${{ steps.meta.outputs.tags }}
+        labels: ${{ steps.meta.outputs.labels }}
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+        build-args: |
+          VERSION=${{ inputs.version }}
+          BUILD_DATE=${{ github.event.head_commit.timestamp }}
+          VCS_REF=${{ github.sha }}
+    
+    - name: Sign container image
+      shell: bash
+      env:
+        COSIGN_PRIVATE_KEY: ${{ inputs.cosign-key }}
+        COSIGN_PASSWORD: ${{ inputs.cosign-pass }}
+      runs: |
+        echo "Signing image with digest: ${{ steps.build.outputs.digest }}"
+        cosign sign --yes ${{ inputs.registry }}/${{ inputs.image-name }}@${{ steps.build.outputs.digest }}  
+      
+    - name: Generate SBOM
+      shell: bash
+      run: |
+        # Install syft for SBOM generation
+        curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh | sh -s -- -b /usr/local/bin
+
+        # Generate SBOM
+        syft ${{ inputs.registry }}/${{ inputs.image-name }}@${{ steps.build.outputs.digest }} -o spdx-json=sbom.spdx.json
+
+        # Sign SBOM
+        # The attestation result will be saved to 'attest-output.json' for later verification or auditing.
+        cosign attest --yes --predicate sbom.spdx.json \
+          --annotation "attestation=sbom" \
+          --output attest-output.json \
+          ${{ inputs.registry }}/${{ inputs.image-name }}@${{ steps.build.outputs.digest }}
+      env:
+        COSIGN_PRIVATE_KEY: ${{ inputs.cosign-key }}
+        COSIGN_PASSWORD: ${{ inputs.cosign-pass }}

@@ -1,0 +1,171 @@
+# .github/actions/security-gate-check/action.yml
+name: 'Security Gate Check'
+description: 'Checks if security team has blocked deployment and enforces the block'
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Check for active security blocks
+      id: check-blocks
+      shell: bash
+      run: |
+        echo "🔍 Checking for active security deployment blocks..."
+        
+        # Check if there are any open issues with security-block label
+        SECURITY_BLOCKS=$(gh api \
+          "repos/${{ github.repository }}/issues" \
+          --jq '.[] | select(.labels[].name == "security-block" and .state == "open") | {number: .number, title: .title, created_at: .created_at, user: .user.login}' \
+          2>/dev/null || echo "")
+        
+        if [ ! -z "$SECURITY_BLOCKS" ]; then
+          echo "security_blocked=true" >> $GITHUB_OUTPUT
+          echo "$SECURITY_BLOCKS" > security_blocks.json
+          
+          # Parse block information
+          BLOCK_COUNT=$(echo "$SECURITY_BLOCKS" | jq -s length)
+          BLOCK_ISSUES=$(echo "$SECURITY_BLOCKS" | jq -r 'select(.number) | "#\(.number): \(.title)"' | head -5)
+          
+          echo "🚨 DEPLOYMENT BLOCKED: Found $BLOCK_COUNT active security block(s)"
+          echo "$BLOCK_ISSUES"
+          
+          echo "block_count=$BLOCK_COUNT" >> $GITHUB_OUTPUT
+          echo "block_issues<<EOF" >> $GITHUB_OUTPUT
+          echo "$BLOCK_ISSUES" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+        else
+          echo "security_blocked=false" >> $GITHUB_OUTPUT
+          echo "✅ No active security blocks found. Deployment can proceed."
+        fi
+      env:
+        GH_TOKEN: ${{ github.token }}
+
+    - name: Fail deployment if blocked
+      if: steps.check-blocks.outputs.security_blocked == 'true'
+      shell: bash
+      run: |
+        echo "::error title=Security Deployment Block::Deployment blocked by security team"
+        
+        # Create a detailed error message
+        cat << 'EOF'
+        🚨 DEPLOYMENT BLOCKED BY SECURITY TEAM 🚨
+        
+        This deployment has been blocked due to active security concerns.
+        
+        Active Security Blocks:
+        ${{ steps.check-blocks.outputs.block_issues }}
+        
+        📋 What this means:
+        - All deployments to staging and production are blocked
+        - Development deployments continue normally
+        - PR builds and testing continue normally
+        
+        🔧 How to resolve:
+        1. Review the security block issues linked above
+        2. Address all security concerns outlined in the issues
+        3. Work with the security team to validate fixes
+        4. Security team will close the blocking issues when resolved
+        5. Deployments will automatically resume once blocks are removed
+        
+        📞 Contact: Reach out to the security team for immediate assistance
+        
+        ⚠️  DO NOT attempt to bypass this security block
+        EOF
+        
+        exit 1
+
+    - name: Create deployment security checkpoint
+      if: steps.check-blocks.outputs.security_blocked == 'false'
+      shell: bash
+      run: |
+        echo "🛡️ Creating security checkpoint for deployment..."
+        
+        # Create a security check status
+        gh api \
+          "repos/${{ github.repository }}/statuses/${{ github.sha }}" \
+          --method POST \
+          --field state="pending" \
+          --field target_url="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+          --field description="Security team review checkpoint" \
+          --field context="security-team-checkpoint"
+        
+        # Wait for potential security team intervention (30 seconds)
+        echo "⏳ Security team intervention window: 30 seconds..."
+        for i in {30..1}; do
+          echo "Security checkpoint: ${i}s remaining..."
+          sleep 1
+          
+          # Check every 10 seconds if a new block was created
+          if [ $((i % 10)) -eq 0 ]; then
+            NEW_BLOCKS=$(gh api \
+              "repos/${{ github.repository }}/issues" \
+              --jq '.[] | select(.labels[].name == "security-block" and .state == "open" and (.created_at | fromdateiso8601) > (now - 60)) | .number' \
+              2>/dev/null || echo "")
+            
+            if [ ! -z "$NEW_BLOCKS" ]; then
+              echo "::error::🚨 New security block detected during checkpoint!"
+              echo "New security block issue(s): $NEW_BLOCKS"
+              
+              gh api \
+                "repos/${{ github.repository }}/statuses/${{ github.sha }}" \
+                --method POST \
+                --field state="failure" \
+                --field target_url="https://github.com/${{ github.repository }}/issues/$NEW_BLOCKS" \
+                --field description="Deployment blocked during security checkpoint" \
+                --field context="security-team-checkpoint"
+              
+              exit 1
+            fi
+          fi
+        done
+        
+        # Final check after waiting period
+        FINAL_BLOCKS=$(gh api \
+          "repos/${{ github.repository }}/issues" \
+          --jq '.[] | select(.labels[].name == "security-block" and .state == "open") | .number' \
+          2>/dev/null || echo "")
+        
+        if [ ! -z "$FINAL_BLOCKS" ]; then
+          echo "::error::🚨 Security block detected after checkpoint!"
+          echo "Blocking issue(s): $FINAL_BLOCKS"
+          
+          gh api \
+            "repos/${{ github.repository }}/statuses/${{ github.sha }}" \
+            --method POST \
+            --field state="failure" \
+            --field target_url="https://github.com/${{ github.repository }}/issues/$FINAL_BLOCKS" \
+            --field description="Deployment blocked by security team" \
+            --field context="security-team-checkpoint"
+          
+          exit 1
+        fi
+        
+        # Update status to success
+        gh api \
+          "repos/${{ github.repository }}/statuses/${{ github.sha }}" \
+          --method POST \
+          --field state="success" \
+          --field target_url="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+          --field description="Security checkpoint passed" \
+          --field context="security-team-checkpoint"
+        
+        echo "✅ Security checkpoint completed successfully"
+        echo "🚀 Deployment approved by security team (no active blocks)"
+      env:
+        GH_TOKEN: ${{ github.token }}
+
+    - name: Log security gate result
+      shell: bash
+      run: |
+        if [ "${{ steps.check-blocks.outputs.security_blocked }}" == "true" ]; then
+          echo "🔴 SECURITY GATE: BLOCKED - ${{ steps.check-blocks.outputs.block_count }} active security issue(s)"
+        else
+          echo "🟢 SECURITY GATE: PASSED - No security blocks detected"
+        fi
+        
+        # Create audit log entry
+        echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) | ${{ github.sha }} | ${{ github.workflow }} | Security Gate: ${{ steps.check-blocks.outputs.security_blocked == 'true' && 'BLOCKED' || 'PASSED' }}" >> security_audit.log
+        
+        # Upload audit log as artifact (optional)
+        if [ -f security_audit.log ]; then
+          echo "📝 Security audit log entry created"
+        fiChecks if security team has blocked deployment'

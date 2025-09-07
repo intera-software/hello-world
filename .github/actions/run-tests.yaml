@@ -1,0 +1,238 @@
+# .github/actions/run-tests/action.yml
+name: 'Run Tests'
+description: 'Runs various types of tests (UAT, load, smoke)'
+
+inputs:
+  test-type:
+    description: 'Type of test to run (uat, load, smoke)'
+    required: true
+  target-url:
+    description: 'Target URL for testing'
+    required: true
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Setup test environment
+      shell: bash
+      run: |
+        echo "Setting up ${{ inputs.test-type }} testing environment..."
+        echo "Target URL: ${{ inputs.target-url }}"
+
+    - name: Run UAT Tests
+      if: inputs.test-type == 'uat'
+      shell: bash
+      run: |
+        echo "Running User Acceptance Tests..."
+        
+        # Install newman for Postman collection running
+        npm install -g newman
+        
+        # Create a basic UAT test collection
+        cat > uat-tests.json << 'EOF'
+        {
+          "info": {
+            "name": "Hello API UAT Tests",
+            "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+          },
+          "item": [
+            {
+              "name": "Health Check",
+              "request": {
+                "method": "GET",
+                "header": [],
+                "url": {
+                  "raw": "{{base_url}}/health",
+                  "host": ["{{base_url}}"],
+                  "path": ["health"]
+                }
+              },
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "exec": [
+                      "pm.test('Status code is 200', function () {",
+                      "    pm.response.to.have.status(200);",
+                      "});",
+                      "pm.test('Response contains status', function () {",
+                      "    pm.expect(pm.response.text()).to.include('Healthy');",
+                      "});"
+                    ]
+                  }
+                }
+              ]
+            },
+            {
+              "name": "Hello World Endpoint",
+              "request": {
+                "method": "GET",
+                "header": [],
+                "url": {
+                  "raw": "{{base_url}}/api/hello",
+                  "host": ["{{base_url}}"],
+                  "path": ["api", "hello"]
+                }
+              },
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "exec": [
+                      "pm.test('Status code is 200', function () {",
+                      "    pm.response.to.have.status(200);",
+                      "});",
+                      "pm.test('Response contains greeting', function () {",
+                      "    pm.expect(pm.response.text()).to.include('Hello');",
+                      "});"
+                    ]
+                  }
+                }
+              ]
+            }
+          ]
+        }
+        EOF
+        
+        # Run UAT tests
+        newman run uat-tests.json \
+          --global-var "base_url=${{ inputs.target-url }}" \
+          --reporters cli,json \
+          --reporter-json-export uat-results.json
+        
+        echo "UAT tests completed"
+
+    - name: Run Load Tests
+      if: inputs.test-type == 'load'
+      shell: bash
+      run: |
+        echo "Running Load Tests..."
+        
+        # Install k6 for load testing
+        curl -s https://github.com/grafana/k6/releases/download/v0.45.0/k6-v0.45.0-linux-amd64.tar.gz | tar xz
+        sudo mv k6-v0.45.0-linux-amd64/k6 /usr/local/bin/
+        
+        # Create load test script
+        cat > load-test.js << 'EOF'
+        import http from 'k6/http';
+        import { check, sleep } from 'k6';
+        
+        export let options = {
+          stages: [
+            { duration: '2m', target: 10 }, // Ramp up
+            { duration: '5m', target: 10 }, // Stay at 10 users
+            { duration: '2m', target: 20 }, // Ramp up to 20 users
+            { duration: '5m', target: 20 }, // Stay at 20 users
+            { duration: '2m', target: 0 },  // Ramp down
+          ],
+          thresholds: {
+            http_req_duration: ['p(95)<500'], // 95% of requests must complete below 500ms
+            http_req_failed: ['rate<0.1'],   // Error rate must be below 10%
+          },
+        };
+        
+        export default function () {
+          let response = http.get(`${__ENV.TARGET_URL}/api/hello`);
+          check(response, {
+            'status is 200': (r) => r.status === 200,
+            'response time < 500ms': (r) => r.timings.duration < 500,
+          });
+          
+          sleep(1);
+        }
+        EOF
+        
+        # Run load test
+        k6 run --env TARGET_URL=${{ inputs.target-url }} load-test.js --out json=load-results.json
+        
+        echo "Load tests completed"
+
+    - name: Run Smoke Tests
+      if: inputs.test-type == 'smoke'
+      shell: bash
+      run: |
+        echo "Running Smoke Tests..."
+        
+        # Basic smoke tests using curl
+        TARGET_URL="${{ inputs.target-url }}"
+        
+        echo "Testing health endpoint..."
+        curl -f -s "$TARGET_URL/health" || (echo "Health endpoint failed" && exit 1)
+        
+        echo "Testing API endpoints..."
+        curl -f -s "$TARGET_URL/api/hello" || (echo "Hello API endpoint failed" && exit 1)
+        
+        echo "Testing response time..."
+        RESPONSE_TIME=$(curl -o /dev/null -s -w '%{time_total}' "$TARGET_URL/api/hello")
+        if (( $(echo "$RESPONSE_TIME > 2.0" | bc -l) )); then
+          echo "Response time too slow: ${RESPONSE_TIME}s"
+          exit 1
+        fi
+        
+        echo "All smoke tests passed"
+
+    - name: Upload test results
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: test-results-${{ inputs.test-type }}
+        path: |
+          *-results.json
+          *.html
+        retention-days: 30
+
+    - name: Analyze test results
+      shell: bash
+      run: |
+        echo "Analyzing ${{ inputs.test-type }} test results..."
+        
+        case "${{ inputs.test-type }}" in
+          "uat")
+            if [ -f uat-results.json ]; then
+              FAILURES=$(jq '.run.failures | length' uat-results.json)
+              TOTAL=$(jq '.run.stats.tests.total' uat-results.json)
+              echo "UAT Results: $((TOTAL - FAILURES))/$TOTAL tests passed"
+              if [ "$FAILURES" -gt 0 ]; then
+                echo "::error::$FAILURES UAT tests failed"
+                exit 1
+              fi
+            fi
+            ;;
+          "load")
+            if [ -f load-results.json ]; then
+              # Check if load test thresholds were met
+              echo "Load test completed. Check artifacts for detailed results."
+              # Add threshold validation logic here
+            fi
+            ;;
+          "smoke")
+            echo "Smoke tests completed successfully"
+            ;;
+        esac
+
+    - name: Comment test results on commit
+      if: github.event_name == 'push'
+      uses: actions/github-script@v7
+      with:
+        script: |
+          const testType = '${{ inputs.test-type }}';
+          const targetUrl = '${{ inputs.target-url }}';
+          
+          let status = '✅';
+          let message = `${testType.toUpperCase()} tests passed successfully`;
+          
+          const comment = `## 🧪 ${testType.toUpperCase()} Test Results
+          
+          **Target**: ${targetUrl}
+          **Status**: ${status} ${message}
+          **Run ID**: ${{ github.run_id }}
+          
+          [View detailed results](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})
+          `;
+          
+          github.rest.repos.createCommitComment({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            commit_sha: context.sha,
+            body: comment
+          });

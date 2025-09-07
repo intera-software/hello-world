@@ -1,0 +1,8 @@
+# GitHub Environment Configuration for Development
+name: development
+protection_rules:
+  required_reviewers: []
+  wait_timer: 0
+deployment_branch_policy:
+  protected_branches: true
+  custom_branch_policies: false

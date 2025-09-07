@@ -1,0 +1,357 @@
+# .github/actions/blue-green-deploy/action.yml
+name: 'Azure App Service Blue-Green Deployment'
+description: 'Performs blue-green deployment using Azure App Service deployment slots'
+
+inputs:
+  image-digest:
+    description: 'Container image digest to deploy'
+    required: false
+  azure-credentials:
+    description: 'Azure service principal credentials'
+    required: true
+  app-service-name:
+    description: 'Azure App Service name'
+    required: true
+  resource-group:
+    description: 'Azure Resource Group name'
+    required: true
+  action:
+    description: 'Action to perform (deploy or rollback)'
+    default: 'deploy'
+  rollback-on-failure:
+    description: 'Automatically rollback on deployment failure'
+    default: 'true'
+
+outputs:
+  url:
+    description: 'Application URL after deployment'
+    value: ${{ steps.swap-slots.outputs.url }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Login to Azure
+      uses: azure/login@v1
+      with:
+        creds: ${{ inputs.azure-credentials }}
+
+    - name: Ensure staging slot exists
+      shell: bash
+      run: |
+        echo "Checking if staging slot exists..."
+        
+        # Check if staging slot exists
+        SLOT_EXISTS=$(az webapp deployment slot list \
+          --resource-group ${{ inputs.resource-group }} \
+          --name ${{ inputs.app-service-name }} \
+          --query "[?name=='staging'].name" -o tsv)
+        
+        if [ -z "$SLOT_EXISTS" ]; then
+          echo "Creating staging deployment slot..."
+          az webapp deployment slot create \
+            --resource-group ${{ inputs.resource-group }} \
+            --name ${{ inputs.app-service-name }} \
+            --slot staging \
+            --configuration-source ${{ inputs.app-service-name }}
+        else
+          echo "Staging slot already exists"
+        fi
+
+    - name: Deploy to staging slot
+      if: inputs.action == 'deploy'
+      shell: bash
+      run: |
+        echo "Deploying to staging slot..."
+        
+        # Deploy container to staging slot
+        az webapp config container set \
+          --resource-group ${{ inputs.resource-group }} \
+          --name ${{ inputs.app-service-name }} \
+          --slot staging \
+          --docker-custom-image-name "ghcr.io/${{ github.repository }}@${{ inputs.image-digest }}" \
+          --docker-registry-server-url "https://ghcr.io"
+        
+        # Set application settings for staging slot
+        az webapp config appsettings set \
+          --resource-group ${{ inputs.resource-group }} \
+          --name ${{ inputs.app-service-name }} \
+          --slot staging \
+          --settings \
+            "ASPNETCORE_ENVIRONMENT=Production" \
+            "ENVIRONMENT=production" \
+            "DEPLOYMENT_SLOT=staging" \
+            "IMAGE_DIGEST=${{ inputs.image-digest }}" \
+            "GITHUB_SHA=${{ github.sha }}" \
+            "GITHUB_RUN_ID=${{ github.run_id }}"
+
+    - name: Wait for staging deployment
+      if: inputs.action == 'deploy'
+      shell: bash
+      run: |
+        echo "Waiting for staging slot deployment to complete..."
+        
+        # Wait for deployment to complete (up to 10 minutes)
+        for i in {1..60}; do
+          echo "Checking staging deployment status (attempt $i/60)..."
+          
+          # Get the latest deployment status
+          DEPLOYMENT_STATUS=$(az webapp deployment list \
+            --resource-group ${{ inputs.resource-group }} \
+            --name ${{ inputs.app-service-name }} \
+            --slot staging \
+            --query '[0].status' -o tsv 2>/dev/null || echo "Unknown")
+          
+          if [ "$DEPLOYMENT_STATUS" = "4" ] || [ "$DEPLOYMENT_STATUS" = "Success" ]; then
+            echo "Staging deployment completed successfully"
+            break
+          elif [ "$DEPLOYMENT_STATUS" = "3" ] || [ "$DEPLOYMENT_STATUS" = "Failed" ]; then
+            echo "::error::Staging deployment failed"
+            exit 1
+          fi
+          
+          sleep 10
+        done
+
+    - name: Health check staging slot
+      if: inputs.action == 'deploy'
+      id: health-check
+      shell: bash
+      run: |
+        # Get staging slot URL
+        STAGING_URL=$(az webapp deployment slot list \
+          --resource-group ${{ inputs.resource-group }} \
+          --name ${{ inputs.app-service-name }} \
+          --query "[?name=='staging'].defaultHostName" -o tsv)
+        
+        STAGING_URL="https://$STAGING_URL"
+        echo "Performing health check on staging slot: $STAGING_URL"
+        
+        # Health check with retries
+        for i in {1..10}; do
+          echo "Health check attempt $i/10..."
+          
+          if curl -f -s "$STAGING_URL/health" > /dev/null; then
+            echo "✅ Staging health check passed"
+            echo "healthy=true" >> $GITHUB_OUTPUT
+            break
+          elif [ $i -eq 10 ]; then
+            echo "::error::Staging health check failed after 10 attempts"
+            echo "healthy=false" >> $GITHUB_OUTPUT
+            exit 1
+          else
+            echo "Health check failed, retrying in 30 seconds..."
+            sleep 30
+          fi
+        done
+
+    - name: Run smoke tests on staging slot
+      if: inputs.action == 'deploy' && steps.health-check.outputs.healthy == 'true'
+      shell: bash
+      run: |
+        # Get staging slot URL
+        STAGING_URL=$(az webapp deployment slot list \
+          --resource-group ${{ inputs.resource-group }} \
+          --name ${{ inputs.app-service-name }} \
+          --query "[?name=='staging'].defaultHostName" -o tsv)
+        
+        STAGING_URL="https://$STAGING_URL"
+        echo "Running smoke tests on staging slot: $STAGING_URL"
+        
+        # Basic API endpoint tests
+        echo "Testing health endpoint..."
+        curl -f -s "$STAGING_URL/health" || (echo "::error::Health endpoint failed" && exit 1)
+        
+        echo "Testing API endpoints..."
+        curl -f -s "$STAGING_URL/api/hello" || (echo "::error::Hello API endpoint failed" && exit 1)
+        
+        # Test response time
+        echo "Testing response time..."
+        RESPONSE_TIME=$(curl -o /dev/null -s -w '%{time_total}' "$STAGING_URL/api/hello")
+        if (( $(echo "$RESPONSE_TIME > 5.0" | bc -l) )); then
+          echo "::warning::Response time is slow: ${RESPONSE_TIME}s"
+        fi
+        
+        echo "✅ Smoke tests passed on staging slot"
+
+    - name: Swap deployment slots (Blue-Green Switch)
+      if: inputs.action == 'deploy'
+      id: swap-slots
+      shell: bash
+      run: |
+        echo "Swapping staging slot to production (Blue-Green deployment)..."
+        
+        # Store current production config for potential rollback
+        az webapp config backup \
+          --resource-group ${{ inputs.resource-group }} \
+          --name ${{ inputs.app-service-name }} \
+          --backup-name "pre-deployment-$(date +%Y%m%d-%H%M%S)"
+        
+        # Perform the slot swap
+        az webapp deployment slot swap \
+          --resource-group ${{ inputs.resource-group }} \
+          --name ${{ inputs.app-service-name }} \
+          --slot staging \
+          --target-slot production
+        
+        # Get production URL
+        PROD_URL=$(az webapp show \
+          --resource-group ${{ inputs.resource-group }} \
+          --name ${{ inputs.app-service-name }} \
+          --query defaultHostName -o tsv)
+        
+        echo "url=https://$PROD_URL" >> $GITHUB_OUTPUT
+        echo "✅ Blue-Green deployment completed successfully"
+        echo "Production URL: https://$PROD_URL"
+
+    - name: Perform rollback
+      if: inputs.action == 'rollback'
+      shell: bash
+      run: |
+        echo "Performing rollback - swapping slots back..."
+        
+        # Swap back to previous version
+        az webapp deployment slot swap \
+          --resource-group ${{ inputs.resource-group }} \
+          --name ${{ inputs.app-service-name }} \
+          --slot staging \
+          --target-slot production
+        
+        echo "✅ Rollback completed successfully"
+
+    - name: Post-deployment verification
+      if: inputs.action == 'deploy'
+      shell: bash
+      run: |
+        PROD_URL="${{ steps.swap-slots.outputs.url }}"
+        echo "Performing post-deployment verification on: $PROD_URL"
+        
+        # Wait a moment for the swap to take effect
+        sleep 30
+        
+        # Verify production is responding correctly
+        for i in {1..5}; do
+          echo "Production verification attempt $i/5..."
+          
+          if curl -f -s "$PROD_URL/health" > /dev/null; then
+            echo "✅ Production verification successful"
+            break
+          elif [ $i -eq 5 ]; then
+            echo "::error::Production verification failed after 5 attempts"
+            exit 1
+          else
+            echo "Verification failed, retrying in 30 seconds..."
+            sleep 30
+          fi
+        done
+        
+        # Test API endpoint
+        if curl -f -s "$PROD_URL/api/hello" > /dev/null; then
+          echo "✅ Production API endpoint test passed"
+        else
+          echo "::warning::Production API endpoint test failed"
+        fi
+
+    - name: Automatic rollback on failure
+      if: failure() && inputs.rollback-on-failure == 'true' && inputs.action == 'deploy'
+      shell: bash
+      run: |
+        echo "::warning::Deployment failed, initiating automatic rollback..."
+        
+        # Perform automatic rollback by swapping slots back
+        az webapp deployment slot swap \
+          --resource-group ${{ inputs.resource-group }} \
+          --name ${{ inputs.app-service-name }} \
+          --slot staging \
+          --target-slot production
+        
+        echo "✅ Automatic rollback completed"
+        
+        # Notify about the rollback
+        echo "::error::Deployment failed and was automatically rolled back. Check the logs for details."
+
+    - name: Clean up old backups
+      if: inputs.action == 'deploy'
+      shell: bash
+      run: |
+        # Keep only the last 5 backups
+        echo "Cleaning up old configuration backups..."
+        
+        az webapp config backup list \
+          --resource-group ${{ inputs.resource-group }} \
+          --name ${{ inputs.app-service-name }} \
+          --query "reverse(sort_by([?starts_with(name, 'pre-deployment-')], &created)) | [5:]" \
+          --output table || echo "No old backups to clean up" app-service -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || \
+                      kubectl get service app-service -o jsonpath='{.spec.clusterIP}')
+        
+        echo "url=http://$SERVICE_URL" >> $GITHUB_OUTPUT
+        echo "Traffic switched successfully to ${{ steps.colors.outputs.deploy-color }}"
+
+    - name: Perform rollback
+      if: inputs.action == 'rollback'
+      shell: bash
+      run: |
+        export KUBECONFIG=kubeconfig
+        
+        # Get the last deployment color for rollback
+        ROLLBACK_COLOR=$(kubectl get service app-service -o jsonpath='{.metadata.annotations.last-deployment-color}')
+        
+        if [ -z "$ROLLBACK_COLOR" ]; then
+          echo "::error::No rollback information found"
+          exit 1
+        fi
+        
+        echo "Rolling back to $ROLLBACK_COLOR deployment"
+        
+        # Switch service back to previous deployment
+        kubectl patch service app-service \
+          --patch "{\"spec\":{\"selector\":{\"color\":\"$ROLLBACK_COLOR\"}}}"
+        
+        echo "Rollback completed successfully"
+
+    - name: Post-deployment verification
+      if: inputs.action == 'deploy'
+      shell: bash
+      run: |
+        export KUBECONFIG=kubeconfig
+        
+        # Wait a moment for traffic switch to take effect
+        sleep 10
+        
+        # Verify the main service is responding
+        SERVICE_URL=$(kubectl get service app-service -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || \
+                      kubectl get service app-service -o jsonpath='{.spec.clusterIP}')
+        
+        echo "Verifying deployment at http://$SERVICE_URL"
+        
+        # Final health check on main service
+        for i in {1..5}; do
+          if curl -f -s "http://$SERVICE_URL/health" > /dev/null; then
+            echo "Post-deployment verification successful"
+            exit 0
+          fi
+          echo "Verification attempt $i failed, retrying..."
+          sleep 5
+        done
+        
+        echo "::error::Post-deployment verification failed"
+        exit 1
+
+    - name: Automatic rollback on failure
+      if: failure() && inputs.rollback-on-failure == 'true' && inputs.action == 'deploy'
+      shell: bash
+      run: |
+        export KUBECONFIG=kubeconfig
+        
+        echo "::warning::Deployment failed, initiating automatic rollback"
+        
+        # Get the last deployment color for rollback
+        ROLLBACK_COLOR=$(kubectl get service app-service -o jsonpath='{.metadata.annotations.last-deployment-color}')
+        
+        if [ ! -z "$ROLLBACK_COLOR" ]; then
+          echo "Rolling back to $ROLLBACK_COLOR deployment"
+          kubectl patch service app-service \
+            --patch "{\"spec\":{\"selector\":{\"color\":\"$ROLLBACK_COLOR\"}}}"
+          echo "Automatic rollback completed"
+        else
+          echo "::error::No rollback information available"
+        fi

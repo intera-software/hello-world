@@ -1,0 +1,158 @@
+# .github/actions/deploy-environment/action.yml
+name: 'Deploy to Azure App Service'
+description: 'Deploys application to specified Azure App Service environment'
+
+inputs:
+  environment:
+    description: 'Target environment (dev, staging)'
+    required: true
+  image-digest:
+    description: 'Container image digest to deploy'
+    required: true
+  azure-credentials:
+    description: 'Azure service principal credentials'
+    required: true
+  app-service-name:
+    description: 'Azure App Service name'
+    required: true
+  resource-group:
+    description: 'Azure Resource Group name'
+    required: true
+
+outputs:
+  url:
+    description: 'Application URL after deployment'
+    value: ${{ steps.deploy.outputs.url }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Login to Azure
+      uses: azure/login@v1
+      with:
+        creds: ${{ inputs.azure-credentials }}
+
+    - name: Set environment variables
+      shell: bash
+      run: |
+        case "${{ inputs.environment }}" in
+          "dev")
+            echo "ASPNETCORE_ENVIRONMENT=Development" >> $GITHUB_ENV
+            echo "APP_SETTINGS={\"ENVIRONMENT\":\"dev\",\"ASPNETCORE_ENVIRONMENT\":\"Development\"}" >> $GITHUB_ENV
+            ;;
+          "staging")
+            echo "ASPNETCORE_ENVIRONMENT=Staging" >> $GITHUB_ENV
+            echo "APP_SETTINGS={\"ENVIRONMENT\":\"staging\",\"ASPNETCORE_ENVIRONMENT\":\"Staging\"}" >> $GITHUB_ENV
+            ;;
+          "production")
+            echo "ASPNETCORE_ENVIRONMENT=Production" >> $GITHUB_ENV
+            echo "APP_SETTINGS={\"ENVIRONMENT\":\"production\",\"ASPNETCORE_ENVIRONMENT\":\"Production\"}" >> $GITHUB_ENV
+            ;;
+        esac
+
+    - name: Deploy to Azure App Service
+      id: deploy
+      uses: azure/webapps-deploy@v2
+      with:
+        app-name: ${{ inputs.app-service-name }}
+        images: 'ghcr.io/${{ github.repository }}@${{ inputs.image-digest }}'
+        
+    - name: Configure App Service settings
+      shell: bash
+      run: |
+        # Set application settings
+        az webapp config appsettings set \
+          --resource-group ${{ inputs.resource-group }} \
+          --name ${{ inputs.app-service-name }} \
+          --settings $(echo '${{ env.APP_SETTINGS }}' | jq -r 'to_entries[] | "\(.key)=\(.value)"' | tr '\n' ' ')
+        
+        # Enable health check
+        az webapp config set \
+          --resource-group ${{ inputs.resource-group }} \
+          --name ${{ inputs.app-service-name }} \
+          --generic-configurations '{"healthCheckPath": "/health"}'
+        
+        # Get the app service URL
+        APP_URL=$(az webapp show \
+          --resource-group ${{ inputs.resource-group }} \
+          --name ${{ inputs.app-service-name }} \
+          --query defaultHostName -o tsv)
+        
+        echo "url=https://$APP_URL" >> $GITHUB_OUTPUT
+        echo "Application deployed successfully to ${{ inputs.environment }}"
+        echo "URL: https://$APP_URL"
+
+    - name: Wait for deployment completion
+      shell: bash
+      run: |
+        APP_URL="${{ steps.deploy.outputs.url }}"
+        echo "Waiting for deployment to be ready at $APP_URL"
+        
+        # Wait for the deployment to be ready (up to 5 minutes)
+        for i in {1..30}; do
+          echo "Checking deployment status (attempt $i/30)..."
+          
+          # Check deployment status via Azure CLI
+          DEPLOYMENT_STATUS=$(az webapp deployment list \
+            --resource-group ${{ inputs.resource-group }} \
+            --name ${{ inputs.app-service-name }} \
+            --query '[0].status' -o tsv 2>/dev/null || echo "Unknown")
+          
+          if [ "$DEPLOYMENT_STATUS" = "4" ] || [ "$DEPLOYMENT_STATUS" = "Success" ]; then
+            echo "Deployment completed successfully"
+            break
+          elif [ "$DEPLOYMENT_STATUS" = "3" ] || [ "$DEPLOYMENT_STATUS" = "Failed" ]; then
+            echo "::error::Deployment failed"
+            exit 1
+          fi
+          
+          sleep 10
+        done
+
+    - name: Run deployment verification
+      shell: bash
+      run: |
+        APP_URL="${{ steps.deploy.outputs.url }}"
+        echo "Verifying deployment at $APP_URL"
+        
+        # Health check with retries
+        for i in {1..10}; do
+          echo "Health check attempt $i/10..."
+          
+          if curl -f -s "$APP_URL/health" > /dev/null; then
+            echo "✅ Health check passed"
+            break
+          elif [ $i -eq 10 ]; then
+            echo "::error::Health check failed after 10 attempts"
+            exit 1
+          else
+            echo "Health check failed, retrying in 30 seconds..."
+            sleep 30
+          fi
+        done
+        
+        # Test basic API endpoint
+        if curl -f -s "$APP_URL/api/hello" > /dev/null; then
+          echo "✅ API endpoint test passed"
+        else
+          echo "::warning::API endpoint test failed"
+        fi
+        
+        echo "Deployment verification completed successfully"
+
+    - name: Add deployment tags
+      shell: bash
+      run: |
+        # Tag the App Service with deployment metadata
+        az resource tag \
+          --resource-group ${{ inputs.resource-group }} \
+          --name ${{ inputs.app-service-name }} \
+          --resource-type "Microsoft.Web/sites" \
+          --tags \
+            "LastDeployment=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            "ImageDigest=${{ inputs.image-digest }}" \
+            "GitHubSHA=${{ github.sha }}" \
+            "GitHubRunId=${{ github.run_id }}" \
+            "Environment=${{ inputs.environment }}"
+        
+        echo "Deployment metadata updated"

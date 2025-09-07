@@ -1,0 +1,59 @@
+name: 'Generate Version'
+description: 'Generates a semantic version based on git history'
+
+outputs:
+  version:
+    description: 'Generated semantic version'
+    value: ${{ steps.version.outputs.version }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Generate Version
+      id: version
+      shell: bash
+      run: |
+        # Get the latest tag from git
+        latest_tag=$(git describe --tags --abbrev=0 2>/dev/null || echo "0.0.0")
+        echo "Latest tag: $latest_tag"
+
+        # Get the commit hash
+        commit_hash=$(git rev-parse --short HEAD)
+        echo "Commit hash: $commit_hash"
+
+        # Parse the latest tag into major, minor, patch, with fallback for invalid format
+        if [[ "$latest_tag" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+          IFS='.' read -r major minor patch <<< "$latest_tag"
+        else
+          major=0
+          minor=0
+          patch=0
+          branch_name=$(echo "${branch_name//[^a-zA-Z0-9]/-}" | tr '[:upper:]' '[:lower:]')
+
+        # Get branch name (if not main)
+        branch_name=""
+        if [[ "$GITHUB_REF" != "refs/heads/main" && "$GITHUB_EVENT_NAME" != "pull_request" ]]; then
+          branch_name=${GITHUB_REF#refs/heads/}
+          branch_name=${branch_name//[^a-zA-Z0-9]/-}
+        fi
+
+        # Generate the version
+        if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
+          version="${major}.${minor}.${patch}--pr${GITHUB_EVENT_NUMBER}.${commit_hash}"
+        elif [ "$GITHUB_REF" = "refs/heads/main" ]; then
+          version="${major}.${minor}.${patch}"
+        else
+          if [ -n "$branch_name" ]; then
+            version="${major}.${minor}.${patch}--${branch_name}.${commit_hash}"
+          else
+            version="${major}.${minor}.${patch}.${commit_hash}"
+          fi
+        fi
+
+        echo "Generated version: $version"
+        if [ -n "$GITHUB_OUTPUT" ]; then
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+        else
+          echo "version=$version" >> version.txt
+        fi
+

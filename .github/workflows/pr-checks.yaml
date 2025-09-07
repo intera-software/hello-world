@@ -1,0 +1,158 @@
+# .github/workflows/pr-checks.yml
+name: Pull Request Checks
+
+on:
+  pull_request:
+    branches: [ main ]
+    types: [opened, synchronize, reopened]
+
+env:
+  DOTNET_VERSION: '9.0.x'
+
+jobs:
+  # Required checks that must pass before merge
+  required-checks:
+    name: Required PR Checks
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Generate version
+        id: version
+        uses: ./.github/actions/generate-version
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Restore dependencies
+        run: dotnet restore
+
+      - name: Build application
+        run: |
+          dotnet build --configuration Release --no-restore \
+            -p:Version=${{ steps.version.outputs.version }}
+
+      - name: Run unit tests with coverage
+        run: |
+          dotnet test --configuration Release --no-build \
+            --collect:"XPlat Code Coverage" \
+            --results-directory ./coverage \
+            --logger trx
+
+      - name: Generate coverage report
+        uses: ./.github/actions/coverage-report
+        with:
+          coverage-path: ./coverage
+
+      - name: Static code analysis
+        uses: ./.github/actions/static-analysis
+        with:
+          sonar-token: ${{ secrets.SONAR_TOKEN }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Security scanning
+        uses: ./.github/actions/security-scan
+        with:
+          scan-type: sast
+          snyk-token: ${{ secrets.SNYK_TOKEN }}
+
+      - name: Dependency check
+        uses: ./.github/actions/security-scan
+        with:
+          scan-type: dependency
+          snyk-token: ${{ secrets.SNYK_TOKEN }}
+
+  # Build container for PR validation
+  build-container:
+    name: Build PR Container
+    runs-on: ubuntu-latest
+    needs: required-checks
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Generate version
+        id: version
+        uses: ./.github/actions/generate-version
+
+      - name: Build and sign container
+        uses: ./.github/actions/build-container
+        with:
+          version: ${{ steps.version.outputs.version }}
+          registry: ghcr.io
+          image-name: ${{ github.repository }}
+          cosign-private-key: ${{ secrets.COSIGN_PRIVATE_KEY }}
+          cosign-password: ${{ secrets.COSIGN_PASSWORD }}
+
+  # Final PR status check
+  pr-status:
+    name: PR Status Check
+    runs-on: ubuntu-latest
+    needs: [required-checks, build-container]
+    if: always()
+    steps:
+      - name: Check PR status
+        run: |
+          if [[ "${{ needs.required-checks.result }}" != "success" || "${{ needs.build-container.result }}" != "success" ]]; then
+            echo "::error::PR checks failed. Please fix issues before merging."
+            exit 1
+          fi
+          echo "✅ All PR checks passed successfully!"
+
+      - name: Update PR status
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { data: pr } = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.issue.number
+            });
+            
+            const status = '${{ needs.required-checks.result }}' === 'success' && 
+                          '${{ needs.build-container.result }}' === 'success' ? 
+                          '✅ Ready for review' : '❌ Checks failed';
+            
+            const comment = `## 🔍 PR Status Summary
+            
+            **Build**: ${'${{ needs.required-checks.result }}' === 'success' ? '✅' : '❌'}
+            **Container**: ${'${{ needs.build-container.result }}' === 'success' ? '✅' : '❌'}
+            **Overall**: ${status}
+            
+            ${status.includes('✅') ? 
+              '**Next Steps**: This PR is ready for developer review. Two approvals from the dev team are required.' : 
+              '**Action Required**: Please fix the failing checks before requesting review.'}
+            
+            [View detailed results](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})
+            `;
+            
+            // Find existing status comment and update it, or create new one
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number
+            });
+            
+            const existingComment = comments.find(comment => 
+              comment.body.includes('## 🔍 PR Status Summary'));
+            
+            if (existingComment) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existingComment.id,
+                body: comment
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: comment
+              });
+            }
